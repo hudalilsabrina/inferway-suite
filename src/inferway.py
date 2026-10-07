@@ -151,39 +151,68 @@ async def harvest_inferway(headless: bool = False, verbose: bool = True) -> Dict
 
 
 async def _create_and_reveal_key(page, verbose: bool = True) -> Optional[str]:
-    """Buat API key baru + klik Reveal secret -> ambil secret."""
-    try:
-        await page.goto(CONSOLE_KEYS, wait_until="domcontentloaded", timeout=40000)
-        await page.wait_for_timeout(5000)
-        # klik Create key
-        await page.evaluate("""() => { const b=[...document.querySelectorAll('button')].find(x=>/^create key$/i.test((x.innerText||'').trim())); if(b) b.click(); }""")
-        await page.wait_for_timeout(2500)
-        # isi nama
-        await page.evaluate("""() => { const i=document.querySelector('input[placeholder*=production]'); if(i) i.focus(); }""")
-        await page.wait_for_timeout(300)
-        await page.keyboard.type("suite-key", delay=40)
-        await page.wait_for_timeout(800)
-        # klik Create key di dialog
-        await page.evaluate("""() => { const btns=[...document.querySelectorAll('button')].filter(x=>/^create key$/i.test((x.innerText||'').trim())); if(btns.length) btns[btns.length-1].click(); }""")
-        await page.wait_for_timeout(5000)
-        # klik Reveal secret
+    """Buat API key baru + klik Reveal secret -> ambil secret. Retry 3x."""
+    for attempt in range(1, 4):
         try:
-            await page.click("button[aria-label='Reveal secret']", timeout=5000)
-            await page.wait_for_timeout(1500)
-        except Exception:
-            pass
-        # ambil secret
-        secret = await page.evaluate("""() => { const e=document.querySelector('[data-testid=secret-value]'); return e?e.textContent:''; }""")
-        if secret and secret.startswith("inferway_"):
-            return secret.strip()
-        # fallback: cari di seluruh DOM
-        secret = await page.evaluate("""() => {
-            const m = document.documentElement.innerHTML.match(/inferway_(live|test)_[A-Za-z0-9_-]{20,}/g);
-            return m ? m[0] : '';
-        }""")
-        return secret.strip() if secret else None
-    except Exception:
-        return None
+            await page.goto(CONSOLE_KEYS, wait_until="domcontentloaded", timeout=40000)
+            await page.wait_for_timeout(6000)
+            # pastikan sudah login (bukan redirect ke sign-in)
+            if "sign-in" in page.url or "sign-up" in page.url:
+                if verbose:
+                    C.print(f"[yellow]  key attempt {attempt}: sesi hilang ({page.url})[/]")
+                await page.wait_for_timeout(3000)
+                continue
+            # klik Create key (tombol utama)
+            clicked = await page.evaluate("""() => {
+                const b=[...document.querySelectorAll('button')].find(x=>/^create key$/i.test((x.innerText||'').trim()));
+                if(b){b.click(); return true;} return false;
+            }""")
+            if not clicked:
+                await page.wait_for_timeout(4000)
+                continue
+            await page.wait_for_timeout(3500)
+            # isi nama
+            await page.evaluate("""() => { const i=document.querySelector('input[placeholder*=production]'); if(i) i.focus(); }""")
+            await page.wait_for_timeout(400)
+            await page.keyboard.type("suite-key", delay=40)
+            await page.wait_for_timeout(1200)
+            # klik Create key di dialog
+            await page.evaluate("""() => { const btns=[...document.querySelectorAll('button')].filter(x=>/^create key$/i.test((x.innerText||'').trim())); if(btns.length) btns[btns.length-1].click(); }""")
+            # tunggu panel secret muncul (poll sampai 15s)
+            got = False
+            for _ in range(15):
+                await page.wait_for_timeout(1000)
+                has = await page.evaluate("""() => !!document.querySelector('[data-testid=secret-value]') || /SHOWN ONLY ONCE/i.test(document.body.innerText)""")
+                if has:
+                    got = True
+                    break
+            if not got:
+                if verbose:
+                    C.print(f"[yellow]  key attempt {attempt}: panel secret tak muncul[/]")
+                await page.wait_for_timeout(2000)
+                continue
+            # klik Reveal secret
+            try:
+                await page.click("button[aria-label='Reveal secret']", timeout=6000)
+                await page.wait_for_timeout(1800)
+            except Exception:
+                pass
+            secret = await page.evaluate("""() => { const e=document.querySelector('[data-testid=secret-value]'); return e?e.textContent:''; }""")
+            if secret and secret.startswith("inferway_"):
+                return secret.strip()
+            secret = await page.evaluate("""() => {
+                const m = document.documentElement.innerHTML.match(/inferway_(live|test)_[A-Za-z0-9_-]{20,}/g);
+                return m ? m[0] : '';
+            }""")
+            if secret and secret.startswith("inferway_"):
+                return secret.strip()
+            if verbose:
+                C.print(f"[yellow]  key attempt {attempt}: secret kosong[/]")
+        except Exception as e:
+            if verbose:
+                C.print(f"[yellow]  key attempt {attempt} err: {str(e)[:60]}[/]")
+        await page.wait_for_timeout(3000)
+    return None
 
 
 def _append_account(email: str, password: str, apikey: str):
